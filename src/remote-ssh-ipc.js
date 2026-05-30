@@ -112,23 +112,59 @@ function registerRemoteSshIpc(options = {}) {
 
   // ── Connect / Disconnect ──
 
+  // Shared connect path used by both the manual `remoteSsh:connect` IPC and the
+  // connect-on-launch startup pass. Connecting is idempotent in the runtime
+  // (already-connecting / connected profiles no-op), so callers don't have to
+  // guard against double-connect. Returns the runtime status snapshot.
+  function connectProfile(profile) {
+    remoteSshRuntime.connect(profile);
+    // Auto-start codex monitor if profile opted in. Best-effort; do not block.
+    if (profile.autoStartCodexMonitor === true) {
+      startCodexMonitorFn({ profile, runtime: remoteSshRuntime, deps: { spawn } })
+        .catch((err) => log("codex monitor start failed:", err && err.message));
+    }
+    return remoteSshRuntime.getProfileStatus(profile.id);
+  }
+
   handle("remoteSsh:connect", async (_event, payload) => {
     const id = typeof payload === "string" ? payload : (payload && payload.profileId);
     const profile = id ? findProfile(settingsController, id) : null;
     if (!profile) return { status: "error", message: "profile not found" };
     try {
-      remoteSshRuntime.connect(profile);
-      // Auto-start codex monitor if profile opted in.
-      if (profile.autoStartCodexMonitor === true) {
-        // best-effort; do not block on this
-        startCodexMonitorFn({ profile, runtime: remoteSshRuntime, deps: { spawn } })
-          .catch((err) => log("codex monitor start failed:", err && err.message));
-      }
-      return { status: "ok", state: remoteSshRuntime.getProfileStatus(id) };
+      const state = connectProfile(profile);
+      return { status: "ok", state };
     } catch (err) {
       return { status: "error", message: (err && err.message) || "connect threw" };
     }
   });
+
+  // Called once from main.js after the app is ready. Connects every profile
+  // that opted into `connectOnLaunch` AND has had its hooks deployed at least
+  // once (lastDeployedAt set) — a tunnel with no hooks shows "connected" but
+  // the pet never reacts, so auto-connecting an undeployed profile would be a
+  // silent dead end. Manual Connect intentionally has no such gate; this
+  // startup pass is conservative because it runs without the user watching.
+  function connectProfilesOnLaunch() {
+    const snap = settingsController.getSnapshot();
+    const profiles = snap && snap.remoteSsh && Array.isArray(snap.remoteSsh.profiles)
+      ? snap.remoteSsh.profiles
+      : [];
+    const connected = [];
+    for (const profile of profiles) {
+      if (!profile || profile.connectOnLaunch !== true) continue;
+      if (!Number.isFinite(profile.lastDeployedAt) || profile.lastDeployedAt <= 0) {
+        log("remote-ssh: skipping connect-on-launch for undeployed profile", profile.id);
+        continue;
+      }
+      try {
+        connectProfile(profile);
+        connected.push(profile.id);
+      } catch (err) {
+        log("remote-ssh: connect-on-launch failed for", profile.id, "-", err && err.message);
+      }
+    }
+    return connected;
+  }
 
   handle("remoteSsh:disconnect", async (_event, payload) => {
     const id = typeof payload === "string" ? payload : (payload && payload.profileId);
@@ -380,10 +416,12 @@ function registerRemoteSshIpc(options = {}) {
 
   return {
     dispose,
+    connectProfilesOnLaunch,
     // Exposed for tests
     _internal: {
       buildInteractiveSshArgs,
       spawnSystemTerminalWithSsh,
+      connectProfile,
     },
   };
 }

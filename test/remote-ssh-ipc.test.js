@@ -750,3 +750,79 @@ test("dispose unregisters all handlers and detaches event listeners", () => {
   rt.emit("status-changed", { profileId: "p1", status: "idle" });
   assert.equal(sentMessages.length, 0);
 });
+
+// ── connect-on-launch ──
+
+// Helper: build IPC with connect/codex-monitor capture for connectOnLaunch tests.
+function makeLaunchHarness(profiles) {
+  const ipcMain = mockIpcMain();
+  const { BrowserWindow } = mockBrowserWindow();
+  const rt = mockRuntime();
+  const connectCalls = [];
+  rt.connect = (profile) => { connectCalls.push(profile.id); return null; };
+  const codexStarts = [];
+  const ipc = registerRemoteSshIpc({
+    ipcMain,
+    settingsController: mockSettingsController(profiles),
+    remoteSshRuntime: rt,
+    BrowserWindow,
+    spawn: makeSucceedingSpawn().spawn,
+    startCodexMonitorFn: async ({ profile }) => { codexStarts.push(profile.id); },
+  });
+  return { ipc, connectCalls, codexStarts };
+}
+
+test("connectProfilesOnLaunch connects a deployed connectOnLaunch profile", () => {
+  const { ipc, connectCalls } = makeLaunchHarness([
+    { ...baseProfile, id: "p1", connectOnLaunch: true, lastDeployedAt: Date.now() },
+  ]);
+  const connected = ipc.connectProfilesOnLaunch();
+  assert.deepEqual(connected, ["p1"]);
+  assert.deepEqual(connectCalls, ["p1"]);
+  ipc.dispose();
+});
+
+test("connectProfilesOnLaunch skips profiles with connectOnLaunch false", () => {
+  const { ipc, connectCalls } = makeLaunchHarness([
+    { ...baseProfile, id: "p1", connectOnLaunch: false, lastDeployedAt: Date.now() },
+  ]);
+  const connected = ipc.connectProfilesOnLaunch();
+  assert.deepEqual(connected, []);
+  assert.deepEqual(connectCalls, []);
+  ipc.dispose();
+});
+
+test("connectProfilesOnLaunch skips connectOnLaunch profiles that were never deployed", () => {
+  const { ipc, connectCalls } = makeLaunchHarness([
+    { ...baseProfile, id: "p1", connectOnLaunch: true }, // no lastDeployedAt
+  ]);
+  const connected = ipc.connectProfilesOnLaunch();
+  assert.deepEqual(connected, []);
+  assert.deepEqual(connectCalls, []);
+  ipc.dispose();
+});
+
+test("connectProfilesOnLaunch also starts the codex monitor when autoStartCodexMonitor is set", () => {
+  const { ipc, connectCalls, codexStarts } = makeLaunchHarness([
+    { ...baseProfile, id: "p1", connectOnLaunch: true, autoStartCodexMonitor: true, lastDeployedAt: Date.now() },
+  ]);
+  const connected = ipc.connectProfilesOnLaunch();
+  assert.deepEqual(connected, ["p1"]);
+  assert.deepEqual(connectCalls, ["p1"]);
+  assert.deepEqual(codexStarts, ["p1"]);
+  ipc.dispose();
+});
+
+test("connectProfilesOnLaunch connects only the opted-in deployed profiles in a mixed set", () => {
+  const now = Date.now();
+  const { ipc, connectCalls } = makeLaunchHarness([
+    { ...baseProfile, id: "p1", connectOnLaunch: true, lastDeployedAt: now },   // connect
+    { ...baseProfile, id: "p2", connectOnLaunch: false, lastDeployedAt: now },  // skip (opt-out)
+    { ...baseProfile, id: "p3", connectOnLaunch: true },                        // skip (undeployed)
+    { ...baseProfile, id: "p4", connectOnLaunch: true, lastDeployedAt: now },   // connect
+  ]);
+  const connected = ipc.connectProfilesOnLaunch();
+  assert.deepEqual(connected, ["p1", "p4"]);
+  assert.deepEqual(connectCalls, ["p1", "p4"]);
+  ipc.dispose();
+});

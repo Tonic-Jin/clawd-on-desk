@@ -2906,6 +2906,18 @@ if (!gotTheLock) {
     // and startUpdateScheduler() short-circuits on !app.isPackaged.
     try { reconcilePendingOnStartup(); } catch (err) { updateLog(`reconcile failed: ${err && err.message}`); }
     try { startUpdateScheduler(); } catch (err) { updateLog(`scheduler start failed: ${err && err.message}`); }
+
+    // Auto-connect Remote SSH profiles that opted into connect-on-launch. The
+    // IPC module gates this to deployed profiles only and connect is idempotent,
+    // so this is safe to fire once here on the ready path.
+    try {
+      const connected = _remoteSshIpc.connectProfilesOnLaunch();
+      if (connected && connected.length) {
+        console.warn("Clawd remote-ssh: connect-on-launch connected", connected.length, "profile(s)");
+      }
+    } catch (err) {
+      console.warn("Clawd remote-ssh: connect-on-launch failed:", err && err.message);
+    }
   });
 
   app.on("before-quit", () => {
